@@ -34,6 +34,7 @@ interface Case {
   id: string;
   day_start: string;
   known: Array<{ hour: number; viewers: number }>;
+  history?: Array<{ at: string; viewers: number }> | null;
   history_hourly: Point[] | null;
   comparables: Comparable[];
 }
@@ -94,11 +95,19 @@ function kernelQuantiles(residuals: Array<{ e: number; w: number }>): number[] {
   });
 }
 
+/** The case's own run-up: its hourly means, else its raw points (the final's minute reads) taken as they come. */
+function caseRunUp(c: Case, p1: number): number | null {
+  const day = Date.parse(c.day_start);
+  const hourly = runUp(c.history_hourly ?? [], day, p1);
+  if (hourly !== null) return hourly;
+  return runUp((c.history ?? []).map((p) => ({ from: p.at, viewers: p.viewers })), day, p1);
+}
+
 function forecast(c: Case): Array<{ hour: number; q: number[] }> {
-  const p1 = Math.max(c.known.find((k) => k.hour === 1)?.viewers ?? 1, 1);
-  const launches = c.comparables.map(launchOf).filter((l): l is Launch => l !== null);
+  const p1 = Math.max(c.known?.find((k) => k.hour === 1)?.viewers ?? 1, 1);
+  const launches = (c.comparables ?? []).map(launchOf).filter((l): l is Launch => l !== null);
   const xs = launches.map((l) => l.x).sort((a, b) => a - b);
-  const x = runUp(c.history_hourly ?? [], Date.parse(c.day_start), p1) ?? xs[Math.floor(xs.length / 2)] ?? 0;
+  const x = caseRunUp(c, p1) ?? xs[Math.floor(xs.length / 2)] ?? 0;
   const rows: Array<{ hour: number; q: number[] }> = [];
   for (let h = 2; h <= 24; h++) {
     const pts = launches.filter((l) => l.ratio[h] !== null).map((l) => ({ x: l.x, y: l.ratio[h] as number, w: l.w }));
@@ -130,5 +139,15 @@ function forecast(c: Case): Array<{ hour: number; q: number[] }> {
 mkdirSync(OUTPUT_DIR, { recursive: true });
 for (const file of readdirSync(INPUT_DIR).filter((f) => f.endsWith('.in')).sort()) {
   const c = JSON.parse(readFileSync(join(INPUT_DIR, file), 'utf8')) as Case;
-  writeFileSync(join(OUTPUT_DIR, `${c.id}.out`), JSON.stringify({ hours: forecast(c) }));
+  const id = typeof c.id === 'string' && c.id !== '' ? c.id : file.slice(0, -3);
+  let hours: Array<{ hour: number; q: number[] }>;
+  try {
+    hours = forecast(c);
+  } catch {
+    // Never leave a case invalid: fall back to a wide band around hour 1's print.
+    const p1 = Math.max(c.known?.find((k) => k.hour === 1)?.viewers ?? 1, 1);
+    hours = [];
+    for (let h = 2; h <= 24; h++) hours.push({ hour: h, q: [-1, -0.4, 0, 0.4, 1].map((s) => Math.round(p1 * Math.exp(s) * 100) / 100) });
+  }
+  writeFileSync(join(OUTPUT_DIR, `${id}.out`), JSON.stringify({ hours }));
 }
